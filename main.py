@@ -22,6 +22,7 @@ from ilids.models.actionclip.factory import create_models_and_transforms
 from PIL import Image
 from pydantic import BaseModel
 from sklearn.manifold import TSNE
+from sklearn.metrics import confusion_matrix
 from starlette._compat import md5_hexdigest
 
 app = FastAPI()
@@ -72,13 +73,12 @@ SEQUENCES_DF = SEQUENCES_DF[
         "Stage",
     ]
 ]
-# Fix index prefix for join
-SEQUENCES_DF = SEQUENCES_DF.set_index("data/sequences/" + SEQUENCES_DF.index)
 
 
 def load_variation_image_features_df(movinet_variation: str):
     pickle_file = ILIDS_PATH / "results" / "actionclip" / f"{movinet_variation}.pkl"
     features_df = pd.read_pickle(pickle_file)
+    features_df.set_index(features_df.index.str.lstrip("data/sequences/"), inplace=True)
 
     # TODO norm
 
@@ -189,7 +189,7 @@ def get_all_images_and_categories() -> Dict[str, List[str]]:
 
     return {
         "index": ALL_IMAGES_FEATURES_DF[model_variation]
-        .index.str.lstrip("data/sequences/")
+        .index
         .to_list(),
         "categories": ALL_IMAGES_FEATURES_DF[model_variation]["category"].to_list(),
     }
@@ -234,26 +234,58 @@ def get_image_tsne(model_variation: str = VARIATION_NAMES[0]) -> Tuple[List, Lis
     return (
         sequences_projections_2d.tolist(),
         ALL_IMAGES_FEATURES_DF[model_variation]
-        .index.str.lstrip("data/sequences/")
+        .index
         .to_list(),
     )
 
 
+class ClipSimilarity(BaseModel):
+    text: str
+    classification: bool  # text classification "as reminder"
+    similarity: float
+
+
+class ConfusionTopK(BaseModel):
+    tp: int
+    fn: int
+    fp: int
+    tn: int
+    topk_text_classification: Dict[str, bool]  # by clip file name (key), give the text classification
+
+
+class SimilarityResponse(BaseModel):
+    similarities: Dict[str, List[ClipSimilarity]]  # key: str, being the clip file name
+    confusion: Dict[int, ConfusionTopK]
+
+
 @app.get("/similarity")
-def get_similarity() -> Dict[str, List[Dict[str, Union[str, float, bool]]]]:
+def get_similarity() -> SimilarityResponse:
     # TODO
     model_variation = VARIATION_NAMES[0]
     images_features = get_images_features(model_variation)
     texts_features = get_all_text_features()
 
     similarities = 100.0 * images_features @ texts_features.T
-    softmax_similarities = similarities.softmax(dim=-1).tolist()
+    softmax_similarities: List[List[float]] = similarities.softmax(dim=-1).tolist()
 
     clips = (
         ALL_IMAGES_FEATURES_DF[model_variation]
-        .index.str.lstrip("data/sequences/")
+        .index
         .tolist()
     )
+
+    texts_len = len(text_features_df)
+    clips_len = len(ALL_IMAGES_FEATURES_DF[model_variation])
+
+    clips_classification = ALL_IMAGES_FEATURES_DF[model_variation]["Classification"] == "TP"
+
+    # ClipIndex, ClipClassification, TextClassification, TextSoftmax
+    similarity_df = ALL_IMAGES_FEATURES_DF[model_variation].index.repeat(texts_len).to_frame(name="clip")
+    similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
+    similarity_df["TextClassification"] = np.tile(text_features_df["classification"], clips_len)
+    similarity_df["TextSoftmax"] = np.array(softmax_similarities).ravel()
+    similarity_df.reset_index(drop=True, inplace=True)
+    similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")["TextSoftmax"].rank(method="first", ascending=False)
 
     texts = list(
         zip(
@@ -262,9 +294,9 @@ def get_similarity() -> Dict[str, List[Dict[str, Union[str, float, bool]]]]:
         )
     )
 
-    return {
+    clips_similarity = {
         clip: [
-            dict(
+            ClipSimilarity(
                 text=text,
                 classification=classification,
                 similarity=clip_softmax_similarity,
@@ -276,8 +308,32 @@ def get_similarity() -> Dict[str, List[Dict[str, Union[str, float, bool]]]]:
         for clip, clip_softmax_similarities in zip(clips, softmax_similarities)
     }
 
+    topks = [k for k in [1, 3, 5] if k <= texts_len]
 
-def get_text_tsne(model_variation: str = VARIATION_NAMES[0]) -> Tuple[List, List, List]:
+    def _get_topk_classification_and_confusion_matrix(topk: int) -> ConfusionTopK:
+        topk_text_classification = similarity_df[similarity_df["TextSoftmaxRank"] <= topk].groupby("clip")["TextClassification"].agg(
+            pd.Series.mode)
+
+        tn, fp, fn, tp = confusion_matrix(clips_classification, topk_text_classification).ravel()
+
+        return ConfusionTopK(
+            tp=tp,
+            fn=fn,
+            fp=fp,
+            tn=tn,
+            # Count most frequent occurrence of text classification by clip
+            topk_text_classification=topk_text_classification.to_dict()
+        )
+
+    topk_confusion = {
+        topk: _get_topk_classification_and_confusion_matrix(topk)
+        for topk in topks
+    }
+
+    return SimilarityResponse(similarities=clips_similarity, confusion=topk_confusion)
+
+
+def get_text_tsne() -> Tuple[List, List, List]:
     assert len(text_features_df) >= 5
     text_features = torch.from_numpy(
         text_features_df[FEATURES_COLUMNS_INDEXES].to_numpy(dtype=np.float64)
@@ -335,10 +391,9 @@ def get_default_tsne_images_features():
 
 @app.get("/tsne-texts")
 def get_default_tsne_images_features():
-    model_variation = VARIATION_NAMES[0]
+    tsne_result, texts, classifications = get_text_tsne()
 
-    tsne_result, texts, classifications = get_text_tsne(model_variation)
-
+    # group results for easier plotting on the frontend with multiple traces
     groups = {
         k: list(map(lambda i: i[1:], g))
         for k, g in groupby(
@@ -404,23 +459,3 @@ def add_all_new_text(request: AddAllTextRequest):
 @app.delete("/text")
 def delete_text(request: RemoveTextRequest):
     text_features_df.drop(index=request.text, inplace=True)
-
-
-@app.get("/tsne-texts")
-def get_default_tsne_images_features():
-    tsne_result, texts, categories = get_text_tsne()
-
-    groups = {
-        k: list(map(lambda i: i[1:], g))
-        for k, g in groupby(sorted(zip(categories, texts, tsne_result)), lambda e: e[0])
-    }
-    groups = {
-        k: {
-            "text": list(map(lambda i: i[0], texts)),
-            "x": list(map(lambda i: i[1][0], texts)),
-            "y": list(map(lambda i: i[1][1], texts)),
-        }
-        for k, texts in groups.items()
-    }
-
-    return groups
