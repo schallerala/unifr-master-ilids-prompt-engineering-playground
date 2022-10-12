@@ -4,6 +4,7 @@ import glob
 import io
 import math
 import os
+import subprocess
 from email.utils import formatdate
 from itertools import groupby
 from math import trunc
@@ -187,12 +188,17 @@ def get_image(image_name: str) -> Response:
 def get_all_images_and_categories() -> Dict[str, List[str]]:
     model_variation = VARIATION_NAMES[0]
 
-    return {
+    clip_indexes = {
         "index": ALL_IMAGES_FEATURES_DF[model_variation]
         .index
         .to_list(),
         "categories": ALL_IMAGES_FEATURES_DF[model_variation]["category"].to_list(),
+        "distances": ALL_IMAGES_FEATURES_DF[model_variation]["Distance"].fillna(np.nan).replace([np.nan], [None]).to_list(),
+        "approaches": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectApproachType"].fillna(np.nan).replace([np.nan], [None]).to_list(),
+        "descriptions": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectDescription"].fillna(np.nan).replace([np.nan], [None]).to_list()
     }
+
+    return clip_indexes
 
 
 @functools.cache
@@ -459,3 +465,13 @@ def add_all_new_text(request: AddAllTextRequest):
 @app.delete("/text")
 def delete_text(request: RemoveTextRequest):
     text_features_df.drop(index=request.text, inplace=True)
+
+
+@app.post("/play/{video_filename}")
+def play_video(video_filename: str):
+    video_path = ILIDS_PATH / "data" / "sequences" / video_filename
+    assert video_path.exists() and video_path.is_file()
+
+    returncode = subprocess.run(["open", video_path]).returncode
+
+    assert returncode == 0
