@@ -1,4 +1,3 @@
-import asyncio
 import functools
 import glob
 import io
@@ -6,8 +5,8 @@ import math
 import os
 import subprocess
 from email.utils import formatdate
+from enum import auto, Enum
 from itertools import groupby
-from math import trunc
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Union
 
@@ -17,7 +16,6 @@ import pandas as pd
 import torch
 from decord import VideoReader, cpu
 from fastapi import FastAPI, Response
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from ilids.models.actionclip.factory import create_models_and_transforms
 from PIL import Image
@@ -189,13 +187,20 @@ def get_all_images_and_categories() -> Dict[str, List[str]]:
     model_variation = VARIATION_NAMES[0]
 
     clip_indexes = {
-        "index": ALL_IMAGES_FEATURES_DF[model_variation]
-        .index
-        .to_list(),
+        "index": ALL_IMAGES_FEATURES_DF[model_variation].index.to_list(),
         "categories": ALL_IMAGES_FEATURES_DF[model_variation]["category"].to_list(),
-        "distances": ALL_IMAGES_FEATURES_DF[model_variation]["Distance"].fillna(np.nan).replace([np.nan], [None]).to_list(),
-        "approaches": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectApproachType"].fillna(np.nan).replace([np.nan], [None]).to_list(),
-        "descriptions": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectDescription"].fillna(np.nan).replace([np.nan], [None]).to_list()
+        "distances": ALL_IMAGES_FEATURES_DF[model_variation]["Distance"]
+        .fillna(np.nan)
+        .replace([np.nan], [None])
+        .to_list(),
+        "approaches": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectApproachType"]
+        .fillna(np.nan)
+        .replace([np.nan], [None])
+        .to_list(),
+        "descriptions": ALL_IMAGES_FEATURES_DF[model_variation]["SubjectDescription"]
+        .fillna(np.nan)
+        .replace([np.nan], [None])
+        .to_list(),
     }
 
     return clip_indexes
@@ -239,9 +244,7 @@ def get_image_tsne(model_variation: str = VARIATION_NAMES[0]) -> Tuple[List, Lis
 
     return (
         sequences_projections_2d.tolist(),
-        ALL_IMAGES_FEATURES_DF[model_variation]
-        .index
-        .to_list(),
+        ALL_IMAGES_FEATURES_DF[model_variation].index.to_list(),
     )
 
 
@@ -256,7 +259,9 @@ class ConfusionTopK(BaseModel):
     fn: int
     fp: int
     tn: int
-    topk_text_classification: Dict[str, bool]  # by clip file name (key), give the text classification
+    topk_text_classification: Dict[
+        str, bool
+    ]  # by clip file name (key), give the text classification
 
 
 class SimilarityResponse(BaseModel):
@@ -264,34 +269,49 @@ class SimilarityResponse(BaseModel):
     confusion: Dict[int, ConfusionTopK]
 
 
+class TopClassificationMethod(str, Enum):
+    mode = "mode"  # text classification with the most frequent class in top k
+    max_sum = "max_sum"  # sum all similarity by text class and pick biggest
+
+
+@app.get("/text-classification")
+def get_similarity_text_classification() -> List[str]:
+    return [e.value for e in TopClassificationMethod]
+
+
 @app.get("/similarity")
-def get_similarity() -> SimilarityResponse:
-    # TODO
-    model_variation = VARIATION_NAMES[0]
-    images_features = get_images_features(model_variation)
+def get_similarity(
+    variation: str = VARIATION_NAMES[0],
+    text_classification: TopClassificationMethod = TopClassificationMethod.mode,
+) -> SimilarityResponse:
+    assert variation in ALL_IMAGES_FEATURES_DF
+
+    images_features = get_images_features(variation)
     texts_features = get_all_text_features()
 
     similarities = 100.0 * images_features @ texts_features.T
     softmax_similarities: List[List[float]] = similarities.softmax(dim=-1).tolist()
 
-    clips = (
-        ALL_IMAGES_FEATURES_DF[model_variation]
-        .index
-        .tolist()
-    )
+    clips = ALL_IMAGES_FEATURES_DF[variation].index.tolist()
 
     texts_len = len(text_features_df)
-    clips_len = len(ALL_IMAGES_FEATURES_DF[model_variation])
+    clips_len = len(ALL_IMAGES_FEATURES_DF[variation])
 
-    clips_classification = ALL_IMAGES_FEATURES_DF[model_variation]["Classification"] == "TP"
+    clips_classification = ALL_IMAGES_FEATURES_DF[variation]["Classification"] == "TP"
 
     # ClipIndex, ClipClassification, TextClassification, TextSoftmax
-    similarity_df = ALL_IMAGES_FEATURES_DF[model_variation].index.repeat(texts_len).to_frame(name="clip")
+    similarity_df = (
+        ALL_IMAGES_FEATURES_DF[variation].index.repeat(texts_len).to_frame(name="clip")
+    )
     similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
-    similarity_df["TextClassification"] = np.tile(text_features_df["classification"], clips_len)
+    similarity_df["TextClassification"] = np.tile(
+        text_features_df["classification"], clips_len
+    )
     similarity_df["TextSoftmax"] = np.array(softmax_similarities).ravel()
     similarity_df.reset_index(drop=True, inplace=True)
-    similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")["TextSoftmax"].rank(method="first", ascending=False)
+    similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")[
+        "TextSoftmax"
+    ].rank(method="first", ascending=False)
 
     texts = list(
         zip(
@@ -317,10 +337,30 @@ def get_similarity() -> SimilarityResponse:
     topks = [k for k in [1, 3, 5] if k <= texts_len]
 
     def _get_topk_classification_and_confusion_matrix(topk: int) -> ConfusionTopK:
-        topk_text_classification = similarity_df[similarity_df["TextSoftmaxRank"] <= topk].groupby("clip")["TextClassification"].agg(
-            pd.Series.mode)
+        if text_classification == TopClassificationMethod.mode:
+            topk_text_classification = (
+                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
+                .groupby("clip")["TextClassification"]
+                .agg(pd.Series.mode)
+            )
+        else:  # elif text_classification == TopClassificationMethod.max_sum:
+            sum_similarities = (
+                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
+                .groupby(["clip", "TextClassification"])["TextSoftmax"]
+                .sum()
+            )
+            topk_text_classification = (
+                sum_similarities.to_frame()
+                .sort_values("TextSoftmax", ascending=False)
+                .reset_index()
+                .drop_duplicates(subset=["clip"], keep="first")
+                .set_index("clip", drop=True)["TextClassification"]
+                .loc[clips_classification.index]
+            )
 
-        tn, fp, fn, tp = confusion_matrix(clips_classification, topk_text_classification).ravel()
+        tn, fp, fn, tp = confusion_matrix(
+            clips_classification, topk_text_classification
+        ).ravel()
 
         return ConfusionTopK(
             tp=tp,
@@ -328,12 +368,11 @@ def get_similarity() -> SimilarityResponse:
             fp=fp,
             tn=tn,
             # Count most frequent occurrence of text classification by clip
-            topk_text_classification=topk_text_classification.to_dict()
+            topk_text_classification=topk_text_classification.to_dict(),
         )
 
     topk_confusion = {
-        topk: _get_topk_classification_and_confusion_matrix(topk)
-        for topk in topks
+        topk: _get_topk_classification_and_confusion_matrix(topk) for topk in topks
     }
 
     return SimilarityResponse(similarities=clips_similarity, confusion=topk_confusion)
@@ -465,6 +504,11 @@ def add_all_new_text(request: AddAllTextRequest):
 @app.delete("/text")
 def delete_text(request: RemoveTextRequest):
     text_features_df.drop(index=request.text, inplace=True)
+
+
+@app.get("/variations")
+def get_variations() -> List[str]:
+    return VARIATION_NAMES
 
 
 @app.post("/play/{video_filename}")
