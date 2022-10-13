@@ -15,7 +15,7 @@ import open_clip
 import pandas as pd
 import torch
 from decord import VideoReader, cpu
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from ilids.models.actionclip.factory import create_models_and_transforms
 from PIL import Image
@@ -79,8 +79,6 @@ def load_variation_image_features_df(movinet_variation: str):
     features_df = pd.read_pickle(pickle_file)
     features_df.set_index(features_df.index.str.lstrip("data/sequences/"), inplace=True)
 
-    # TODO norm
-
     # Drop NaN, in case a sequence wasn't fed to the model as it didn't have enough frames
     df = SEQUENCES_DF.join(features_df).dropna(subset=FEATURES_COLUMNS_INDEXES)
 
@@ -112,29 +110,21 @@ model_text = create_models_and_transforms(
 )[1]
 
 
+class TextRequest(BaseModel):
+    texts: List[str]
+    classification: List[bool]
+
+
 @functools.cache
-def get_text_features(text: str) -> np.ndarray:
-    tokenized_text = open_clip.tokenize([text])
+def get_text_features_cached(texts: Tuple[str, ...]) -> torch.Tensor:
+    tokenized_texts = open_clip.tokenize(list(texts))
 
     with torch.no_grad():
-        return model_text(tokenized_text).numpy().ravel()
+        return model_text(tokenized_texts)
 
 
-TEXT_FEATURES_LEN = len(get_text_features(""))
-
-TEXT_DF_COLUMNS = ["classification"] + list(range(TEXT_FEATURES_LEN))
-
-text_features_df = pd.DataFrame([], columns=TEXT_DF_COLUMNS)
-
-
-@functools.cache
-def update_texts_dataframe(new_text: str, classification: bool) -> np.ndarray:
-    features = get_text_features(new_text)
-    new_entry = pd.Series([classification, *features], index=TEXT_DF_COLUMNS)
-
-    text_features_df.loc[new_text] = new_entry
-
-    return features
+def get_text_features(texts: List[str]) -> torch.Tensor:
+    return get_text_features_cached(tuple(texts))
 
 
 @functools.cache
@@ -207,28 +197,28 @@ def get_all_images_and_categories() -> Dict[str, List[str]]:
 
 
 @functools.cache
-def get_images_features(model_variation: str) -> torch.Tensor:
+def get_images_features(model_variation: str, normalized: bool = True) -> torch.Tensor:
     features = torch.from_numpy(
         ALL_IMAGES_FEATURES_DF[model_variation][FEATURES_COLUMNS_INDEXES].to_numpy(
-            dtype=np.float64
+            dtype=np.float32
         )
     )
-    features /= features.norm(dim=-1, keepdim=True)
+    if normalized:
+        features /= features.norm(dim=-1, keepdim=True)
 
     return features
 
 
-def get_all_text_features() -> torch.Tensor:
-    features = torch.from_numpy(
-        text_features_df[FEATURES_COLUMNS_INDEXES].to_numpy(dtype=np.float64)
-    )
-    features /= features.norm(dim=-1, keepdim=True)
+def get_all_text_features(texts: List[str], normalized: bool = True) -> torch.Tensor:
+    features = get_text_features(texts)
+    if normalized:
+        features /= features.norm(dim=-1, keepdim=True)
 
     return features
 
 
 @functools.cache
-def get_image_tsne(model_variation: str = VARIATION_NAMES[0]) -> Tuple[List, List]:
+def get_image_tsne(model_variation: str) -> Tuple[List, List]:
     features = get_images_features(model_variation)
 
     sequences_projections_2d = TSNE(
@@ -272,6 +262,7 @@ class SimilarityResponse(BaseModel):
 class TopClassificationMethod(str, Enum):
     mode = "mode"  # text classification with the most frequent class in top k
     max_sum = "max_sum"  # sum all similarity by text class and pick biggest
+    any = "any"  # any text classification in top k is defined as alarm
 
 
 @app.get("/text-classification")
@@ -279,22 +270,35 @@ def get_similarity_text_classification() -> List[str]:
     return [e.value for e in TopClassificationMethod]
 
 
-@app.get("/similarity")
-def get_similarity(
-    variation: str = VARIATION_NAMES[0],
-    text_classification: TopClassificationMethod = TopClassificationMethod.mode,
-) -> SimilarityResponse:
+class TextsRequest(BaseModel):
+    texts: List[str]
+    classifications: List[bool]
+
+
+class SimilarityRequest(TextsRequest):
+    model_variation: str
+    text_classification_method: TopClassificationMethod
+
+
+@app.post("/similarity")
+def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
+    texts = request.texts
+    classifications = request.classifications
+    variation = request.model_variation
+    text_classification = request.text_classification_method
+
     assert variation in ALL_IMAGES_FEATURES_DF
+    assert len(texts) == len(classifications) and len(texts) > 0
 
     images_features = get_images_features(variation)
-    texts_features = get_all_text_features()
+    texts_features = get_all_text_features(texts)
 
     similarities = 100.0 * images_features @ texts_features.T
     softmax_similarities: List[List[float]] = similarities.softmax(dim=-1).tolist()
 
     clips = ALL_IMAGES_FEATURES_DF[variation].index.tolist()
 
-    texts_len = len(text_features_df)
+    texts_len = len(texts)
     clips_len = len(ALL_IMAGES_FEATURES_DF[variation])
 
     clips_classification = ALL_IMAGES_FEATURES_DF[variation]["Classification"] == "TP"
@@ -304,34 +308,28 @@ def get_similarity(
         ALL_IMAGES_FEATURES_DF[variation].index.repeat(texts_len).to_frame(name="clip")
     )
     similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
-    similarity_df["TextClassification"] = np.tile(
-        text_features_df["classification"], clips_len
-    )
+    similarity_df["Text"] = np.tile(texts, clips_len)
+    similarity_df["TextClassification"] = np.tile(classifications, clips_len)
     similarity_df["TextSoftmax"] = np.array(softmax_similarities).ravel()
     similarity_df.reset_index(drop=True, inplace=True)
     similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")[
         "TextSoftmax"
     ].rank(method="first", ascending=False)
 
-    texts = list(
-        zip(
-            text_features_df.index.to_list(),
-            text_features_df["classification"].to_list(),
-        )
-    )
-
     clips_similarity = {
         clip: [
             ClipSimilarity(
-                text=text,
-                classification=classification,
-                similarity=clip_softmax_similarity,
+                text=row["Text"],
+                classification=row["TextClassification"],
+                similarity=row["TextSoftmax"],
             )
-            for (text, classification), clip_softmax_similarity in zip(
-                texts, clip_softmax_similarities
-            )
+            for i, row in rows_df.iterrows()
         ]
-        for clip, clip_softmax_similarities in zip(clips, softmax_similarities)
+        for clip, rows_df in similarity_df[
+            ["clip", "Text", "TextClassification", "TextSoftmax"]
+        ]
+        .sort_values("TextSoftmax", ascending=False)
+        .groupby("clip")
     }
 
     topks = [k for k in [1, 3, 5] if k <= texts_len]
@@ -343,7 +341,13 @@ def get_similarity(
                 .groupby("clip")["TextClassification"]
                 .agg(pd.Series.mode)
             )
-        else:  # elif text_classification == TopClassificationMethod.max_sum:
+        elif text_classification == TopClassificationMethod.any:
+            topk_text_classification = (
+                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
+                .groupby("clip")["TextClassification"]
+                .any()
+            )
+        elif text_classification == TopClassificationMethod.max_sum:
             sum_similarities = (
                 similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
                 .groupby(["clip", "TextClassification"])["TextSoftmax"]
@@ -357,6 +361,8 @@ def get_similarity(
                 .set_index("clip", drop=True)["TextClassification"]
                 .loc[clips_classification.index]
             )
+        else:
+            raise ValueError(text_classification)
 
         tn, fp, fn, tp = confusion_matrix(
             clips_classification, topk_text_classification
@@ -378,24 +384,18 @@ def get_similarity(
     return SimilarityResponse(similarities=clips_similarity, confusion=topk_confusion)
 
 
-def get_text_tsne() -> Tuple[List, List, List]:
-    assert len(text_features_df) >= 5
-    text_features = torch.from_numpy(
-        text_features_df[FEATURES_COLUMNS_INDEXES].to_numpy(dtype=np.float64)
-    )
-    text_features /= text_features.norm(dim=-1, keepdim=True)
+def get_text_tsne(texts: List[str]) -> List[List[float]]:
+    assert len(texts) >= 5
+
+    text_features = get_text_features(texts)
 
     texts_projections_2d = TSNE(
         n_components=2,
         random_state=16896375,
-        perplexity=min(30.0, math.floor(len(text_features) - 1)),
+        perplexity=min(30.0, math.floor(len(texts) - 1)),
     ).fit_transform(text_features)
 
-    return (
-        texts_projections_2d.tolist(),
-        text_features_df.index.to_list(),
-        text_features_df["classification"].to_list(),
-    )
+    return texts_projections_2d.tolist()
 
 
 @app.get("/tsne-images/{model_variation}")
@@ -427,16 +427,14 @@ def get_tsne_images_features(model_variation: str):
     return groups
 
 
-@app.get("/tsne-images")
-def get_default_tsne_images_features():
-    model_variation = VARIATION_NAMES[0]
+@app.post("/tsne-texts")
+def get_default_tsne_images_features(request: TextsRequest):
+    texts = request.texts
+    classifications = request.classifications
 
-    return get_tsne_images_features(model_variation)
+    assert len(texts) == len(classifications) and len(texts) > 0
 
-
-@app.get("/tsne-texts")
-def get_default_tsne_images_features():
-    tsne_result, texts, classifications = get_text_tsne()
+    tsne_result = get_text_tsne(texts)
 
     # group results for easier plotting on the frontend with multiple traces
     groups = {
@@ -457,19 +455,6 @@ def get_default_tsne_images_features():
     return groups
 
 
-@app.get("/text")
-def get_all_texts() -> Dict[str, List[Union[str, bool]]]:
-    return {
-        "text": text_features_df.index.to_list(),
-        "classification": text_features_df["classification"].to_list(),
-    }
-
-
-class AddTextRequest(BaseModel):
-    text: str
-    classification: bool
-
-
 class UpdateTextRequest(BaseModel):
     text: str
     classification: bool
@@ -482,28 +467,6 @@ class AddAllTextRequest(BaseModel):
 
 class RemoveTextRequest(BaseModel):
     text: str
-
-
-@app.post("/text/add")
-def add_new_text(request: AddTextRequest):
-    update_texts_dataframe(request.text, request.classification)
-
-
-@app.put("/text")
-def add_new_text(request: UpdateTextRequest):
-    text_features_df.loc[request.text, "classification"] = request.classification
-
-
-@app.post("/text/add-all")
-def add_all_new_text(request: AddAllTextRequest):
-    assert len(request.texts) == len(request.classifications)
-    for text, classification in zip(request.texts, request.classifications):
-        update_texts_dataframe(text, classification)
-
-
-@app.delete("/text")
-def delete_text(request: RemoveTextRequest):
-    text_features_df.drop(index=request.text, inplace=True)
 
 
 @app.get("/variations")
