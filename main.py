@@ -8,7 +8,7 @@ from email.utils import formatdate
 from enum import auto, Enum
 from itertools import groupby
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Union
+from typing import Dict, List, Set, Tuple, Union, Optional
 
 import numpy as np
 import open_clip
@@ -71,7 +71,7 @@ SEQUENCES_DF = SEQUENCES_DF[
         "Distraction",
         "Stage",
     ]
-]
+].head(400)
 
 
 def load_variation_image_features_df(movinet_variation: str):
@@ -116,15 +116,11 @@ class TextRequest(BaseModel):
 
 
 @functools.cache
-def get_text_features_cached(texts: Tuple[str, ...]) -> torch.Tensor:
-    tokenized_texts = open_clip.tokenize(list(texts))
+def get_text_features(text: str) -> torch.Tensor:
+    tokenized_texts = open_clip.tokenize([text])
 
     with torch.no_grad():
-        return model_text(tokenized_texts)
-
-
-def get_text_features(texts: List[str]) -> torch.Tensor:
-    return get_text_features_cached(tuple(texts))
+        return model_text(tokenized_texts).squeeze()
 
 
 @functools.cache
@@ -204,25 +200,33 @@ def get_images_features(model_variation: str, normalized: bool = True) -> torch.
         )
     )
     if normalized:
-        features /= features.norm(dim=-1, keepdim=True)
+        normalize_features(features)
 
     return features
 
 
 def get_all_text_features(texts: List[str], normalized: bool = True) -> torch.Tensor:
-    features = get_text_features(texts)
+    features = torch.vstack(tuple(get_text_features(text) for text in texts))
     if normalized:
-        features /= features.norm(dim=-1, keepdim=True)
+        features = normalize_features(features)
 
     return features
 
 
+def normalize_features(features):
+    features /= features.norm(dim=-1, keepdim=True)
+    return features
+
+
 @functools.cache
-def get_image_tsne(model_variation: str) -> Tuple[List, List]:
+def get_image_tsne(model_variation: str, text_count: int) -> Tuple[List, List]:
     features = get_images_features(model_variation)
 
     sequences_projections_2d = TSNE(
-        n_components=2, random_state=RANDOM_STATE, init="pca"
+        n_components=2,
+        random_state=RANDOM_STATE,
+        init="pca",
+        perplexity=get_tsne_perplexity(text_count),
     ).fit_transform(features)
 
     # fig = px.scatter(
@@ -278,6 +282,16 @@ class TextsRequest(BaseModel):
 class SimilarityRequest(TextsRequest):
     model_variation: str
     text_classification_method: TopClassificationMethod
+    texts_to_subtract: Optional[List[str]] = None
+
+
+def _audit_confusion(request: SimilarityRequest, tp: int, fn: int, fp: int, tn: int):
+    history_path = Path("history.csv")
+    open_mode, add_header = ("a", False) if history_path.exists() else ("w", True)
+
+    pd.DataFrame([dict(**request.dict(), tp=tp, fn=fn, fp=fp, tn=tn)]).to_csv(
+        history_path, header=add_header, index=False, mode=open_mode
+    )
 
 
 @app.post("/similarity")
@@ -290,27 +304,37 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
     assert variation in ALL_IMAGES_FEATURES_DF
     assert len(texts) == len(classifications) and len(texts) > 0
 
-    images_features = get_images_features(variation)
-    texts_features = get_all_text_features(texts)
+    images_features = get_images_features(variation, False)
+    texts_features = get_all_text_features(texts, False)
+
+    texts_to_subtract_features_sum = (
+        torch.zeros(images_features.shape[-1])
+        if not request.texts_to_subtract
+        else get_all_text_features(request.texts_to_subtract, False).sum(dim=0)
+    )
+
+    images_features -= texts_to_subtract_features_sum
+    texts_features -= texts_to_subtract_features_sum
+
+    images_features = normalize_features(images_features)
+    texts_features = normalize_features(texts_features)
 
     similarities = 100.0 * images_features @ texts_features.T
-    softmax_similarities: List[List[float]] = similarities.softmax(dim=-1).tolist()
-
-    clips = ALL_IMAGES_FEATURES_DF[variation].index.tolist()
+    softmax_similarities = similarities.softmax(dim=-1)
 
     texts_len = len(texts)
     clips_len = len(ALL_IMAGES_FEATURES_DF[variation])
 
     clips_classification = ALL_IMAGES_FEATURES_DF[variation]["Classification"] == "TP"
 
-    # ClipIndex, ClipClassification, TextClassification, TextSoftmax
+    # ClipIndex, ClipClassification, Text, TextClassification, TextSoftmax, TextSoftmaxRank
     similarity_df = (
         ALL_IMAGES_FEATURES_DF[variation].index.repeat(texts_len).to_frame(name="clip")
     )
     similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
     similarity_df["Text"] = np.tile(texts, clips_len)
     similarity_df["TextClassification"] = np.tile(classifications, clips_len)
-    similarity_df["TextSoftmax"] = np.array(softmax_similarities).ravel()
+    similarity_df["TextSoftmax"] = softmax_similarities.numpy().ravel()
     similarity_df.reset_index(drop=True, inplace=True)
     similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")[
         "TextSoftmax"
@@ -368,12 +392,14 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
             clips_classification, topk_text_classification
         ).ravel()
 
+        _audit_confusion(request, tp=tp, fn=fn, fp=fp, tn=tn)
+
         return ConfusionTopK(
             tp=tp,
             fn=fn,
             fp=fp,
             tn=tn,
-            # Count most frequent occurrence of text classification by clip
+            # Get text classification by clip using the given method
             topk_text_classification=topk_text_classification.to_dict(),
         )
 
@@ -387,20 +413,24 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
 def get_text_tsne(texts: List[str]) -> List[List[float]]:
     assert len(texts) >= 5
 
-    text_features = get_text_features(texts)
+    text_features = get_all_text_features(texts)
 
     texts_projections_2d = TSNE(
         n_components=2,
         random_state=16896375,
-        perplexity=min(30.0, math.floor(len(texts) - 1)),
+        perplexity=get_tsne_perplexity(len(texts)),
     ).fit_transform(text_features)
 
     return texts_projections_2d.tolist()
 
 
+def get_tsne_perplexity(text_count: int):
+    return min(30.0, math.floor(text_count - 1))
+
+
 @app.get("/tsne-images/{model_variation}")
-def get_tsne_images_features(model_variation: str):
-    tsne_result, index = get_image_tsne(model_variation)
+def get_tsne_images_features(model_variation: str, text_count: int = 30):
+    tsne_result, index = get_image_tsne(model_variation, text_count)
 
     groups = {
         k: list(map(lambda i: i[1:], g))
