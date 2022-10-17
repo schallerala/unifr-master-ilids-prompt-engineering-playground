@@ -109,7 +109,7 @@ OPENAI_BASE_MODEL_NAME = {
     "vit-b-16-16f": "ViT-B-16",
     "vit-b-16-32f": "ViT-B-16",
     "vit-b-16-8f": "ViT-B-16",
-    "vit-b-32-8f": "ViT-B-32"
+    "vit-b-32-8f": "ViT-B-32",
 }
 
 
@@ -184,6 +184,7 @@ def get_cached_image_response(image_name: str) -> Response:
 def get_image():
     return "Hello"
 
+
 @app.get("/image/{image_name}")
 def get_image(image_name: str) -> Response:
     return get_cached_image_response(image_name)
@@ -228,10 +229,14 @@ def get_images_features(model_variation: str, normalized: bool = True) -> torch.
     return features
 
 
-def get_all_text_features(texts: List[str], model_variation: str, normalized: bool = True) -> torch.Tensor:
+def get_all_text_features(
+    texts: List[str], model_variation: str, normalized: bool = True
+) -> torch.Tensor:
     # this way the results can be cached - might lose performance of vectorization but gaining by
     # caching results
-    features = torch.vstack(tuple(get_text_features(text, model_variation) for text in texts))
+    features = torch.vstack(
+        tuple(get_text_features(text, model_variation) for text in texts)
+    )
     if normalized:
         features = normalize_features(features)
 
@@ -288,6 +293,8 @@ class ConfusionTopK(BaseModel):
 
 class SimilarityResponse(BaseModel):
     similarities: Dict[str, List[ClipSimilarity]]  # key: str, being the clip file name
+    max: float  # max similarity
+    min: float  # min similarity
     confusion: Dict[int, ConfusionTopK]
 
 
@@ -311,6 +318,7 @@ class TextsRequest(BaseModel):
 class SimilarityRequest(TextsRequest):
     text_classification_method: TopClassificationMethod
     texts_to_subtract: Optional[List[str]] = None
+    apply_softmax: bool = True
 
 
 def _audit_confusion(request: SimilarityRequest, tp: int, fn: int, fp: int, tn: int):
@@ -338,7 +346,9 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
     texts_to_subtract_features_sum = (
         torch.zeros(images_features.shape[-1])
         if not request.texts_to_subtract
-        else get_all_text_features(request.texts_to_subtract, variation, False).sum(dim=0)
+        else get_all_text_features(request.texts_to_subtract, variation, False).sum(
+            dim=0
+        )
     )
 
     images_features -= texts_to_subtract_features_sum
@@ -348,7 +358,8 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
     texts_features = normalize_features(texts_features)
 
     similarities = 100.0 * images_features @ texts_features.T
-    softmax_similarities = similarities.softmax(dim=-1)
+    if request.apply_softmax:
+        similarities = similarities.softmax(dim=-1)
 
     clips_features_df = images_features_df(variation)
 
@@ -357,32 +368,33 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
 
     clips_classification = clips_features_df["Classification"] == "TP"
 
-    # ClipIndex, ClipClassification, Text, TextClassification, TextSoftmax, TextSoftmaxRank
-    similarity_df = (
-        clips_features_df.index.repeat(texts_len).to_frame(name="clip")
-    )
+    # ClipIndex, ClipClassification, Text, TextClassification, TextSimilarity, TextSimilarityRank
+    similarity_df = clips_features_df.index.repeat(texts_len).to_frame(name="clip")
     similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
     similarity_df["Text"] = np.tile(texts, clips_len)
     similarity_df["TextClassification"] = np.tile(classifications, clips_len)
-    similarity_df["TextSoftmax"] = softmax_similarities.numpy().ravel()
+    similarity_df["TextSimilarity"] = similarities.numpy().ravel()
     similarity_df.reset_index(drop=True, inplace=True)
-    similarity_df["TextSoftmaxRank"] = similarity_df.groupby("clip")[
-        "TextSoftmax"
+    similarity_df["TextSimilarityRank"] = similarity_df.groupby("clip")[
+        "TextSimilarity"
     ].rank(method="first", ascending=False)
+
+    min_similarity = float(similarities.min())
+    max_similarity = float(similarities.max())
 
     clips_similarity = {
         clip: [
             ClipSimilarity(
                 text=row["Text"],
                 classification=row["TextClassification"],
-                similarity=row["TextSoftmax"],
+                similarity=row["TextSimilarity"],
             )
             for i, row in rows_df.iterrows()
         ]
         for clip, rows_df in similarity_df[
-            ["clip", "Text", "TextClassification", "TextSoftmax"]
+            ["clip", "Text", "TextClassification", "TextSimilarity"]
         ]
-        .sort_values("TextSoftmax", ascending=False)
+        .sort_values("TextSimilarity", ascending=False)
         .groupby("clip")
     }
 
@@ -391,25 +403,25 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
     def _get_topk_classification_and_confusion_matrix(topk: int) -> ConfusionTopK:
         if text_classification == TopClassificationMethod.mode:
             topk_text_classification = (
-                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
+                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
                 .groupby("clip")["TextClassification"]
                 .agg(pd.Series.mode)
             )
         elif text_classification == TopClassificationMethod.any:
             topk_text_classification = (
-                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
+                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
                 .groupby("clip")["TextClassification"]
                 .any()
             )
         elif text_classification == TopClassificationMethod.max_sum:
             sum_similarities = (
-                similarity_df[similarity_df["TextSoftmaxRank"] <= topk]
-                .groupby(["clip", "TextClassification"])["TextSoftmax"]
+                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
+                .groupby(["clip", "TextClassification"])["TextSimilarity"]
                 .sum()
             )
             topk_text_classification = (
                 sum_similarities.to_frame()
-                .sort_values("TextSoftmax", ascending=False)
+                .sort_values("TextSimilarity", ascending=False)
                 .reset_index()
                 .drop_duplicates(subset=["clip"], keep="first")
                 .set_index("clip", drop=True)["TextClassification"]
@@ -437,7 +449,12 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
         topk: _get_topk_classification_and_confusion_matrix(topk) for topk in topks
     }
 
-    return SimilarityResponse(similarities=clips_similarity, confusion=topk_confusion)
+    return SimilarityResponse(
+        similarities=clips_similarity,
+        max=max_similarity,
+        min=min_similarity,
+        confusion=topk_confusion,
+    )
 
 
 @timeit()
@@ -498,7 +515,11 @@ def get_default_tsne_images_features(request: TextsRequest):
     texts = request.texts
     classifications = request.classifications
 
-    assert len(texts) == len(classifications) and len(texts) > 0 and request.model_variation in VARIATION_NAMES
+    assert (
+        len(texts) == len(classifications)
+        and len(texts) > 0
+        and request.model_variation in VARIATION_NAMES
+    )
 
     tsne_result = get_text_tsne(tuple(texts), request.model_variation)
 
