@@ -24,7 +24,7 @@ from sklearn.manifold import TSNE
 from sklearn.metrics import confusion_matrix
 from starlette._compat import md5_hexdigest
 
-from timeit import timeit
+from utils_timeit import timeit
 
 app = FastAPI()
 
