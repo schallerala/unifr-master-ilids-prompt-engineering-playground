@@ -542,20 +542,6 @@ def get_default_tsne_images_features(request: TextsRequest):
     return groups
 
 
-class UpdateTextRequest(BaseModel):
-    text: str
-    classification: bool
-
-
-class AddAllTextRequest(BaseModel):
-    texts: List[str]
-    classifications: List[bool]
-
-
-class RemoveTextRequest(BaseModel):
-    text: str
-
-
 @app.get("/variations")
 def get_variations() -> List[str]:
     return VARIATION_NAMES
