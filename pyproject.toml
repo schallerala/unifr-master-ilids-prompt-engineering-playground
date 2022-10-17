@@ -21,7 +21,7 @@ ilids = {path = "../ilids"}
 
 [tool.poetry.group.dev.dependencies]
 uvicorn = "^0.18.3"
-black = "^22.10.0"
+black = {extras = ["jupyter"], version = "^22.10.0"}
 isort = "^5.10.1"
 
 [build-system]
