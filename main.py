@@ -78,7 +78,7 @@ def sequences_df() -> pd.DataFrame:
             "Distraction",
             "Stage",
         ]
-    ].head(400)
+    ]
 
     return SEQUENCES_DF
 
@@ -180,11 +180,6 @@ def get_cached_image_response(image_name: str) -> Response:
     return Response(im_bytes, headers=headers, media_type="image/png")
 
 
-@app.get("/")
-def get_image():
-    return "Hello"
-
-
 @app.get("/image/{image_name}")
 def get_image(image_name: str) -> Response:
     return get_cached_image_response(image_name)
@@ -224,7 +219,7 @@ def get_images_features(model_variation: str, normalized: bool = True) -> torch.
         )
     )
     if normalized:
-        normalize_features(features)
+        return normalize_features(features)
 
     return features
 
@@ -357,9 +352,9 @@ def get_similarity(request: SimilarityRequest) -> SimilarityResponse:
     images_features = normalize_features(images_features)
     texts_features = normalize_features(texts_features)
 
-    similarities = 100.0 * images_features @ texts_features.T
+    similarities = images_features @ texts_features.T
     if request.apply_softmax:
-        similarities = similarities.softmax(dim=-1)
+        similarities = (100. * similarities).softmax(dim=-1)
 
     clips_features_df = images_features_df(variation)
 
