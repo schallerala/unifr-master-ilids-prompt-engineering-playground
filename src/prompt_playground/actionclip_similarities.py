@@ -17,7 +17,7 @@ from prompt_playground.actionclip import (
     get_all_text_features,
     get_images_features,
 )
-from prompt_playground.monitoring import timeit
+from prompt_playground.monitoring import timeit, SHARED_MONITORING_LOGGER_NAME
 from prompt_playground.tensor_utils import normalize_features
 
 HISTORY_PATH = Path(os.getcwd()) / "history.csv"
@@ -61,7 +61,7 @@ class SimilarityParams(BaseModel):
     apply_softmax: bool = True
 
 
-@timeit()
+@timeit(logger_name=SHARED_MONITORING_LOGGER_NAME)
 def _get_similarities(
     variation: str,
     texts: List[str],
@@ -89,7 +89,7 @@ def _get_similarities(
     return similarities
 
 
-@timeit()
+@timeit(logger_name=SHARED_MONITORING_LOGGER_NAME)
 def _get_clips_similarity_dict(similarity_df):
     clips_similarity = defaultdict(list)
 
@@ -111,12 +111,57 @@ def _get_clips_similarity_dict(similarity_df):
     return clips_similarity
 
 
-def _audit_confusion(request: SimilarityParams, tp: int, fn: int, fp: int, tn: int):
+@timeit(logger_name=SHARED_MONITORING_LOGGER_NAME)
+def _get_topk_classification_and_confusion_matrix(
+    text_classification: TopClassificationMethod,
+    clips_index: pd.Index,
+    y_true: pd.Series,
+    similarity_df: pd.DataFrame,
+) -> ConfusionTopK:
+    if text_classification == TopClassificationMethod.mode:
+        topk_text_classification = similarity_df.groupby("clip")[
+            "TextClassification"
+        ].agg(pd.Series.mode)
+    elif text_classification == TopClassificationMethod.any:
+        topk_text_classification = similarity_df.groupby("clip")[
+            "TextClassification"
+        ].any()
+    elif text_classification == TopClassificationMethod.max_sum:
+        sum_similarities = similarity_df.groupby(["clip", "TextClassification"])[
+            "TextSimilarity"
+        ].sum()
+        topk_text_classification = (
+            sum_similarities.to_frame()
+            .sort_values("TextSimilarity", ascending=False)
+            .reset_index()
+            .drop_duplicates(subset=["clip"], keep="first")
+            .set_index("clip", drop=True)["TextClassification"]
+            # to order it back to normal
+            .loc[clips_index]
+        )
+    else:
+        raise ValueError(text_classification)
+
+    tn, fp, fn, tp = confusion_matrix(y_true, topk_text_classification).ravel()
+
+    return ConfusionTopK(
+        tp=tp,
+        fn=fn,
+        fp=fp,
+        tn=tn,
+        # Get text classification by clip using the given method
+        topk_text_classification=topk_text_classification.to_dict(),
+    )
+
+
+def _audit_confusion(
+    request: SimilarityParams, topk: int, tp: int, fn: int, fp: int, tn: int
+):
     open_mode, add_header = ("a", False) if HISTORY_PATH.exists() else ("w", True)
 
-    pd.DataFrame([dict(**request.dict(), tp=tp, fn=fn, fp=fp, tn=tn)]).to_csv(
-        HISTORY_PATH, header=add_header, index=False, mode=open_mode
-    )
+    pd.DataFrame(
+        [dict(topk=topk, **request.dict(), tp=tp, fn=fn, fp=fp, tn=tn)]
+    ).to_csv(HISTORY_PATH, header=add_header, index=False, mode=open_mode)
 
 
 def clips_texts_similarities(params: SimilarityParams) -> SimilarityResponse:
@@ -137,11 +182,9 @@ def clips_texts_similarities(params: SimilarityParams) -> SimilarityResponse:
     texts_len = len(texts)
     clips_len = len(clips_features_df)
 
-    clips_classification = clips_features_df["Classification"] == "TP"
-
     # ClipIndex, ClipClassification, Text, TextClassification, TextSimilarity, TextSimilarityRank
     similarity_df = clips_features_df.index.repeat(texts_len).to_frame(name="clip")
-    similarity_df["ClipClassification"] = clips_classification.repeat(texts_len)
+    similarity_df["ClipClassification"] = clips_features_df["Alarm"].repeat(texts_len)
     similarity_df["Text"] = np.tile(texts, clips_len)
     similarity_df["TextClassification"] = np.tile(classifications, clips_len)
     similarity_df["TextSimilarity"] = similarities.numpy().ravel()
@@ -158,55 +201,29 @@ def clips_texts_similarities(params: SimilarityParams) -> SimilarityResponse:
         "TextSimilarity"
     ].rank(method="first", ascending=False)
 
-    @timeit()
-    def _get_topk_classification_and_confusion_matrix(topk: int) -> ConfusionTopK:
-        if text_classification == TopClassificationMethod.mode:
-            topk_text_classification = (
-                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
-                .groupby("clip")["TextClassification"]
-                .agg(pd.Series.mode)
-            )
-        elif text_classification == TopClassificationMethod.any:
-            topk_text_classification = (
-                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
-                .groupby("clip")["TextClassification"]
-                .any()
-            )
-        elif text_classification == TopClassificationMethod.max_sum:
-            sum_similarities = (
-                similarity_df[similarity_df["TextSimilarityRank"] <= topk]
-                .groupby(["clip", "TextClassification"])["TextSimilarity"]
-                .sum()
-            )
-            topk_text_classification = (
-                sum_similarities.to_frame()
-                .sort_values("TextSimilarity", ascending=False)
-                .reset_index()
-                .drop_duplicates(subset=["clip"], keep="first")
-                .set_index("clip", drop=True)["TextClassification"]
-                .loc[clips_classification.index]
-            )
-        else:
-            raise ValueError(text_classification)
+    topk_confusion: Dict[int, ConfusionTopK] = dict()
 
-        tn, fp, fn, tp = confusion_matrix(
-            clips_classification, topk_text_classification
-        ).ravel()
-
-        _audit_confusion(params, tp=tp, fn=fn, fp=fp, tn=tn)
-
-        return ConfusionTopK(
-            tp=tp,
-            fn=fn,
-            fp=fp,
-            tn=tn,
-            # Get text classification by clip using the given method
-            topk_text_classification=topk_text_classification.to_dict(),
+    # go in reversed order, to always reduce the dataframe size and "speed up" a bit the selection
+    # for the top K
+    for topk in reversed(topks):
+        similarity_df = similarity_df[similarity_df["TextSimilarityRank"] <= topk]
+        confusion = _get_topk_classification_and_confusion_matrix(
+            text_classification,
+            clips_features_df.index,
+            clips_features_df["Alarm"],
+            similarity_df,
         )
 
-    topk_confusion = {
-        topk: _get_topk_classification_and_confusion_matrix(topk) for topk in topks
-    }
+        topk_confusion[topk] = confusion
+
+        _audit_confusion(
+            params,
+            topk=topk,
+            tp=confusion.tp,
+            fn=confusion.fn,
+            fp=confusion.fp,
+            tn=confusion.tn,
+        )
 
     return SimilarityResponse.construct(
         similarities=clips_similarity,

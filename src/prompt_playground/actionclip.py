@@ -12,7 +12,7 @@ from ilids.models.actionclip.factory import create_models_and_transforms
 
 from prompt_playground import ILIDS_PATH
 from prompt_playground.ilids import sequences_df
-from prompt_playground.monitoring import timeit
+from prompt_playground.monitoring import timeit, SHARED_MONITORING_LOGGER_NAME
 from prompt_playground.tensor_utils import normalize_features
 
 _FEATURES_COLUMNS_INDEXES = pd.RangeIndex.from_range(range(512))
@@ -85,7 +85,7 @@ def get_text_features(text: str, model_variation: str) -> torch.Tensor:
         return get_text_model(model_variation)(tokenized_texts).squeeze()
 
 
-@timeit()
+@timeit(logger_name=SHARED_MONITORING_LOGGER_NAME)
 def get_all_text_features(
     texts: List[str], model_variation: str, normalized: bool = True
 ) -> torch.Tensor:

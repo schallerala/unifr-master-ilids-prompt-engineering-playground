@@ -31,12 +31,13 @@ from prompt_playground.actionclip_similarities import (
     clips_texts_similarities,
 )
 from prompt_playground.ilids import sequences_df
+from prompt_playground.monitoring import SHARED_MONITORING_LOGGER_NAME
 from prompt_playground.precache_registry import PrecacheRegistry
 from prompt_playground.tsne import get_text_tsne, get_image_tsne
 
 logger = getLogger(__name__)
 
-getLogger("prompt_playground.monitoring").setLevel(logging.DEBUG)
+getLogger(SHARED_MONITORING_LOGGER_NAME).setLevel(logging.DEBUG)
 
 app = FastAPI()
 
