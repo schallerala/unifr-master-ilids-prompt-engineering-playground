@@ -4,7 +4,7 @@ version = "0.1.0"
 description = ""
 authors = ["Alain Schaller <schallerala@gmail.com>"]
 readme = "README.md"
-packages = [{include = "prompt_playground"}]
+packages = [{include = "prompt_playground", from = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.11"
@@ -23,6 +23,7 @@ ilids = {path = "../ilids"}
 black = {extras = ["jupyter"], version = "^22.10.0"}
 isort = "^5.10.1"
 nbdime = "^3.1.1"
+pytest = "^7.1.3"
 uvicorn = "^0.18.3"
 
 [build-system]
