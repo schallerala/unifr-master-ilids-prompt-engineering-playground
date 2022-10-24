@@ -1,0 +1,38 @@
+site_name: Master Thesis - Alain Schaller - UNIFR
+site_author: Alain Schaller
+site_url: https://master.alains.ch
+repo_url: https://github.com/schallerala/unifr-master-ilids-alarms
+repo_name: schallerala/unifr-master-ilids-alarms
+
+# nav:
+# - Home: index.md
+# - Notebook page 1: new_simi_human_features.ipynb
+# - Notebook page 2: similarity_ratio_balanced_top_n_tests.ipynb
+# - Notebook page 3: similarity_ratio_const_denom.ipynb
+# - Notebook page 4: similarity_ratio.ipynb
+# - Notebook page 5: similarity_ratio_minus_human_similarity.ipynb
+# - Notebook page 6: similarity_ratio_minus_human_features.ipynb
+# - Notebook page 7: clips_similarities.ipynb
+
+# extra_javascript:
+#   -
+
+extra_css:
+  - stylesheets/extra.css
+
+
+plugins:
+  - mkdocs-jupyter:
+      theme: dark
+      include: ["*.ipynb"]
+      include_source: True
+      execute: True
+      # show_input: False
+      # no_input: True  # You can also decide to hide the Out[#] output notation and other cell metadata for all the notebooks
+
+
+theme:
+  name: material
+  custom_dir: overrides
+  palette:
+    scheme: slate

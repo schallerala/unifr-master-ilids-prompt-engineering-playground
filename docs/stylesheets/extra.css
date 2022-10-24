@@ -1,0 +1,13 @@
+/* In case of notebook, extend horizontally */
+.md-grid:has(.jupyter-wrapper) {
+    max-width: initial;
+}
+
+
+/* In case no TOC (secondary sidebar, hide it) */
+[data-md-type="toc"] {
+    display: none !important;
+}
+[data-md-type="toc"]:has(nav > *) {
+    display: block !important;
+}
