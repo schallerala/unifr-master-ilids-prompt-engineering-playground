@@ -1,5 +1,5 @@
 /* In case of notebook, extend horizontally */
-.md-grid:has(.jupyter-wrapper) {
+.md-grid:has(.code_cell) {
     max-width: initial;
 }
 

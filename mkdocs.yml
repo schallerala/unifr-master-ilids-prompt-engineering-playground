@@ -4,6 +4,7 @@ site_url: https://master.alains.ch
 repo_url: https://github.com/schallerala/unifr-master-ilids-alarms
 repo_name: schallerala/unifr-master-ilids-alarms
 
+# To ease organization of navigation https://github.com/lukasgeiter/mkdocs-awesome-pages-plugin/
 # nav:
 # - Home: index.md
 # - Notebook page 1: new_simi_human_features.ipynb
@@ -14,25 +15,58 @@ repo_name: schallerala/unifr-master-ilids-alarms
 # - Notebook page 6: similarity_ratio_minus_human_features.ipynb
 # - Notebook page 7: clips_similarities.ipynb
 
-# extra_javascript:
-#   -
+extra_javascript:
+    - javascripts/mathjax.js
+    - https://polyfill.io/v3/polyfill.min.js?features=es6
+    - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 extra_css:
-  - stylesheets/extra.css
-
+    - stylesheets/extra.css
 
 plugins:
-  - mkdocs-jupyter:
-      theme: dark
-      include: ["*.ipynb"]
-      include_source: True
-      execute: True
-      # show_input: False
-      # no_input: True  # You can also decide to hide the Out[#] output notation and other cell metadata for all the notebooks
-
+    - search  # built-in search plugin: https://squidfunk.github.io/mkdocs-material/setup/setting-up-site-search/#built-in-search-plugin
+    - mknotebooks:
+        execute: true
+        timeout: 600  # 600 seconds = 10 minutes
+        preamble: _ipynb_preamble.py
+    # - mkdocs-jupyter:
+    #     theme: dark
+    #     include: ["*.ipynb"]
+    #     include_source: True
+    #     execute: True
+    #     # show_input: False
+    #     # no_input: True  # You can also decide to hide the Out[#] output notation and other cell metadata for all the notebooks
 
 theme:
-  name: material
-  custom_dir: overrides
-  palette:
-    scheme: slate
+    name: material
+    font:
+        text: "Roboto"
+        code: "Roboto Mono"
+    custom_dir: overrides
+    language: "en"
+    palette:
+        # Palette toggle for light mode
+        - media: "(prefers-color-scheme: light)"
+          scheme: default
+          primary: blue grey
+          accent: light blue
+          toggle:
+              icon: material/brightness-7
+              name: Switch to dark mode
+
+        # Palette toggle for dark mode
+        - media: "(prefers-color-scheme: dark)"
+          scheme: slate
+          primary: blue grey
+          accent: light blue
+          toggle:
+              icon: material/brightness-4
+              name: Switch to light mode
+
+markdown_extensions:
+    - pymdownx.highlight:
+        auto_title: true
+    - pymdownx.superfences
+    # https://squidfunk.github.io/mkdocs-material/reference/mathjax/#mkdocsyml
+    - pymdownx.arithmatex:
+          generic: true
