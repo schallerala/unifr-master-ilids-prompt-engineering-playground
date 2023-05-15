@@ -20,10 +20,10 @@ ilids = {path = "../ilids"}
 
 
 [tool.poetry.group.doc.dependencies]
-mkdocs = "^1.4.1"
-mkdocs-material = "^8.5.7"
+mkdocs = "^1.4.3"
+mkdocs-material = "^9.1.12"
 mknotebooks = "^0.7.1"
-Pygments = "^2.13.0"
+Pygments = "^2.15.1"
 
 
 
