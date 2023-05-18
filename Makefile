@@ -17,3 +17,6 @@ all-docs: all-docs-ipynb
 
 
 
+deploy-to-netlify:
+	netlify deploy --prod
+.PHONY: deploy-to-netlify

@@ -26,7 +26,8 @@ extra_css:
 plugins:
     - search  # built-in search plugin: https://squidfunk.github.io/mkdocs-material/setup/setting-up-site-search/#built-in-search-plugin
     - mknotebooks:
-        execute: false
+        execute: true
+        timeout: 600  # 600 seconds = 10 minutes
     # - mkdocs-jupyter:
     #     theme: dark
     #     include: ["*.ipynb"]
