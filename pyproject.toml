@@ -16,7 +16,7 @@ decord = {path = "../ilids/build/decord/python"}
 Pillow = "^9.2.0"
 scipy = "^1.9.2"
 scikit-learn = "^1.1.2"
-ilids = {path = "../ilids"}
+ilids = {path = "../ilids", develop = true}
 
 
 [tool.poetry.group.doc.dependencies]

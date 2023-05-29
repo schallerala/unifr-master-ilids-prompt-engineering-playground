@@ -45,9 +45,6 @@ def images_features_df(variation: str) -> pd.DataFrame:
     # Drop NaN, in case a sequence wasn't fed to the model as it didn't have enough frames
     df = sequences_df().join(features_df).dropna(subset=_FEATURES_COLUMNS_INDEXES)
 
-    # For each sample, get the highest feature/signal
-    df["Activation"] = df[_FEATURES_COLUMNS_INDEXES].max(axis=1)
-
     return df
 
 
