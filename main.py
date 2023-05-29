@@ -8,7 +8,7 @@ import subprocess
 from email.utils import formatdate
 from itertools import groupby
 from logging import getLogger
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 from decord import VideoReader, cpu
@@ -33,6 +33,7 @@ from prompt_playground.actionclip_similarities import (
 from prompt_playground.ilids import sequences_df
 from prompt_playground.monitoring import SHARED_MONITORING_LOGGER_NAME
 from prompt_playground.precache_registry import PrecacheRegistry
+from prompt_playground.roc import roc_auc
 from prompt_playground.tsne import get_text_tsne, get_image_tsne
 
 logger = getLogger(__name__)
@@ -197,6 +198,36 @@ def get_default_tsne_images_features(request: TextsRequest):
     }
 
     return groups
+
+
+class RocResponse(BaseModel):
+    fpr: List[float]
+    tpr: List[float]
+    thresholds: List[float]
+    auc: float
+
+
+@app.post("/roc-auc")
+def get_roc_auc(request: TextsRequest) -> RocResponse:
+    texts = request.texts
+    classifications = request.classifications
+    model_variation = request.model_variation
+
+    assert (
+        len(texts) == len(classifications)
+        and len(texts) > 0
+        and len(set(classifications)) == 2  # require positive and negative texts
+        and model_variation in VARIATION_NAMES
+    )
+
+    (fpr, tpr, thresholds), auc = roc_auc(model_variation, tuple(texts), tuple(classifications))
+
+    return RocResponse(
+        fpr=fpr.tolist(),
+        tpr=tpr.tolist(),
+        thresholds=thresholds.tolist(),
+        auc=auc,
+    )
 
 
 @app.post("/play/{video_filename}")

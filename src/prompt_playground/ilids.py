@@ -26,6 +26,7 @@ def sequences_df() -> pd.DataFrame:
     ]
 
     df["Alarm"] = df["Classification"] == "TP"
+    df["y_true"] = df["Alarm"]
 
     df["category"] = None  # "create" a new column
     df.loc[df["Distraction"].notnull(), "category"] = "Distraction"
