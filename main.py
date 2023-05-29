@@ -72,6 +72,11 @@ def get_variations() -> List[str]:
     return VARIATION_NAMES
 
 
+class VisualTsneRequest(BaseModel):
+    texts: List[str]
+    model_variation: str
+
+
 class TextsRequest(BaseModel):
     texts: List[str]
     classifications: List[bool]
@@ -128,9 +133,14 @@ def get_similarities(params: SimilarityParams):
     return clips_texts_similarities(params)
 
 
-@app.get("/tsne-images/{model_variation}")
-def get_tsne_images_features(model_variation: str, text_count: int = 30):
-    tsne_result, index = get_image_tsne(model_variation, text_count)
+@app.post("/tsne-images")
+def get_tsne_images_features(request: VisualTsneRequest):
+    model_variation = request.model_variation
+    texts = request.texts
+
+    assert request.model_variation in VARIATION_NAMES
+
+    tsne_result, index = get_image_tsne(model_variation, tuple(texts))
 
     groups = {
         k: list(map(lambda i: i[1:], g))
@@ -168,7 +178,7 @@ def get_default_tsne_images_features(request: TextsRequest):
         and request.model_variation in VARIATION_NAMES
     )
 
-    tsne_result = get_text_tsne(tuple(texts), request.model_variation)
+    tsne_result = get_text_tsne(request.model_variation, tuple(texts))
 
     # group results for easier plotting on the frontend with multiple traces
     groups = {

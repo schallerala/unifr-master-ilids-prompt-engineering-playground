@@ -7,7 +7,7 @@ DIRNAME_SOURCE_PATH = Path(os.path.dirname(__file__)).resolve()
 
 ILIDS_PATH = DIRNAME_SOURCE_PATH.parent.parent.parent / "ilids"
 
-RANDOM_STATE = 16896375
+RANDOM_STATE = 16896375  # student number as seed
 
 
 logging_config = {
